@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
 
 RED='\033[1;31m'
 GREEN='\033[1;32m'
@@ -11,7 +11,13 @@ WHITE='\033[1;37m'
 RESET='\033[0m'
 BOLD='\033[1m'
 
-REPORT_FILE="/root/elite_audit_$(date +%Y%m%d_%H%M%S).txt"
+PRIMARY_REPORT_FILE="/root/elite_audit_$(date -u +%Y%m%d_%H%M%SZ).txt"
+REPORT_FILE="$PRIMARY_REPORT_FILE"
+MAX_CVE_DISPLAY=25
+SCAN_TIMEOUT_SECONDS=45
+TMP_PS_PIDS=""
+TMP_PROC_PIDS=""
+SENSITIVE_FILE_PATTERNS=(".env" "*.pem" "id_rsa" "id_ed25519")
 KNOWN_SUID_LIST=(
   /usr/bin/chage /usr/bin/chfn /usr/bin/chsh /usr/bin/gpasswd /usr/bin/mount
   /usr/bin/newgrp /usr/bin/passwd /usr/bin/su /usr/bin/sudo /usr/bin/umount
@@ -33,6 +39,17 @@ flag() { log_line "  ${RED}${BOLD}[🚩 FLAG]${RESET} $1"; }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 print_kv() { info "$(printf '%-18s %s' "$1:" "$2")"; }
+run_with_timeout() {
+  if have_cmd timeout; then
+    timeout "${SCAN_TIMEOUT_SECONDS}s" "$@"
+  else
+    "$@"
+  fi
+}
+cleanup_tmp() {
+  [[ -n "${TMP_PS_PIDS:-}" ]] && rm -f "$TMP_PS_PIDS"
+  [[ -n "${TMP_PROC_PIDS:-}" ]] && rm -f "$TMP_PROC_PIDS"
+}
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
@@ -51,7 +68,11 @@ banner() {
 }
 
 setup_report() {
-  : >"$REPORT_FILE"
+  if ! >"$REPORT_FILE" 2>/dev/null; then
+    REPORT_FILE="/tmp/elite_audit_$(date -u +%Y%m%d_%H%M%SZ).txt"
+    warn "Could not write to $PRIMARY_REPORT_FILE; falling back to $REPORT_FILE"
+    >"$REPORT_FILE"
+  fi
   print_kv "Report File" "$REPORT_FILE"
 }
 
@@ -99,7 +120,7 @@ kernel_vulnerability_check() {
   if [[ -n "$les" ]]; then
     ok "linux-exploit-suggester detected at $les"
     local cve_matches
-    cve_matches=$(bash "$les" 2>/dev/null | grep -E 'CVE-[0-9]{4}-[0-9]+' | head -n 25 || true)
+    cve_matches=$(bash "$les" 2>/dev/null | grep -E 'CVE-[0-9]{4}-[0-9]+' | head -n "${MAX_CVE_DISPLAY}" || true)
     if [[ -n "$cve_matches" ]]; then
       warn "Potential kernel exploit matches detected (top 25 shown):"
       while IFS= read -r line; do
@@ -216,26 +237,39 @@ flag_secret_discovery() {
   section "5) Flag & Secret Discovery"
 
   info "CTF-style flag pattern scan"
-  grep -R -n -I -E 'flag\{[^}]{1,200}\}|ctf\{[^}]{1,200}\}|FLAG\{[^}]{1,200}\}' \
+  if run_with_timeout grep -R -n -I -E 'flag\{[^}]{1,200}\}|ctf\{[^}]{1,200}\}|FLAG\{[^}]{1,200}\}' \
     /root /home /opt /var/tmp /tmp 2>/dev/null | head -n 40 | while IFS= read -r line; do
-    flag "$line"
-  done
+      flag "$line"
+    done; then
+    :
+  else
+    warn "Flag pattern scan timed out after ${SCAN_TIMEOUT_SECONDS}s"
+  fi
 
   info "Sensitive file discovery (.env, key material)"
-  local perms=""
-  find /root /home /etc /opt -xdev \( -name '.env' -o -name '*.pem' -o -name 'id_rsa' -o -name 'id_ed25519' \) 2>/dev/null | while IFS= read -r path; do
+  local permissions=""
+  find /root /home /etc /opt -xdev \( \
+    -name "${SENSITIVE_FILE_PATTERNS[0]}" -o \
+    -name "${SENSITIVE_FILE_PATTERNS[1]}" -o \
+    -name "${SENSITIVE_FILE_PATTERNS[2]}" -o \
+    -name "${SENSITIVE_FILE_PATTERNS[3]}" \
+  \) 2>/dev/null | while IFS= read -r path; do
     flag "Sensitive file candidate: $path"
-    perms=$(stat -c '%a' "$path" 2>/dev/null || echo "unknown")
-    info "Permissions: $perms"
+    permissions=$(stat -c '%a' "$path" 2>/dev/null || echo "unknown")
+    info "Permissions: $permissions"
   done
 
   info "API/token keyword scan (redacted output)"
   local location=""
-  grep -R -n -I -E '(api[_-]?key|secret|token|passwd|password|authorization)' \
+  if run_with_timeout grep -R -n -I -E '(api[_-]?key|secret|token|passwd|password|authorization)' \
     /root /home /etc /opt 2>/dev/null | head -n 60 | while IFS= read -r line; do
-    location="${line%%:*}:${line#*:}"
-    flag "Keyword match: ${location%%:*}:$(echo "${location#*:}" | sed 's/[[:alnum:]][[:alnum:]_\-]\{3,\}/[REDACTED]/g')"
-  done
+      location="$(echo "$line" | cut -d: -f1-2)"
+      flag "Keyword match at $location (content redacted)"
+    done; then
+    :
+  else
+    warn "Secret keyword scan timed out after ${SCAN_TIMEOUT_SECONDS}s"
+  fi
 }
 
 network_analysis() {
@@ -377,7 +411,7 @@ ssh_hardening_check() {
   for key in "${!checks[@]}"; do
     local expected="${checks[$key]}"
     local actual
-    actual=$(awk -v k="$key" 'tolower($1)==tolower(k){print $2}' "$cfg" | tail -n1)
+    actual=$(awk -v k="$key" 'tolower($1)==tolower(k){print $2; exit}' "$cfg")
     if [[ -z "$actual" ]]; then
       warn "$key not explicitly set"
     elif [[ "${actual,,}" == "${expected,,}" ]]; then
@@ -421,12 +455,17 @@ rootkit_backdoor_detection() {
   done
 
   info "Potential hidden process anomalies"
-  ps -e -o pid= 2>/dev/null | sort -n > /tmp/elite_audit_ps_pids.$$
-  ls /proc 2>/dev/null | grep -E '^[0-9]+$' | sort -n > /tmp/elite_audit_proc_pids.$$
-  comm -13 /tmp/elite_audit_ps_pids.$$ /tmp/elite_audit_proc_pids.$$ | head -n 40 | while IFS= read -r pid; do
+  TMP_PS_PIDS="$(mktemp)"
+  TMP_PROC_PIDS="$(mktemp)"
+  chmod 600 "$TMP_PS_PIDS" "$TMP_PROC_PIDS" 2>/dev/null || true
+  ps -e -o pid= 2>/dev/null | sort -n > "$TMP_PS_PIDS"
+  ls /proc 2>/dev/null | grep -E '^[0-9]+$' | sort -n > "$TMP_PROC_PIDS"
+  comm -13 "$TMP_PS_PIDS" "$TMP_PROC_PIDS" | head -n 40 | while IFS= read -r pid; do
     [[ -n "$pid" ]] && flag "PID appears in /proc but not ps: $pid"
   done
-  rm -f /tmp/elite_audit_ps_pids.$$ /tmp/elite_audit_proc_pids.$$
+  cleanup_tmp
+  TMP_PS_PIDS=""
+  TMP_PROC_PIDS=""
 }
 
 final_summary() {
@@ -434,13 +473,13 @@ final_summary() {
   ok "Audit complete"
   print_kv "Report" "$REPORT_FILE"
   info "Offline review: less $REPORT_FILE"
-  cp "$REPORT_FILE" "${REPORT_FILE}.plain"
   strip_color <"$REPORT_FILE" >"${REPORT_FILE}.plain" || true
   info "Plain text copy: ${REPORT_FILE}.plain"
 }
 
 main() {
   require_root
+  trap cleanup_tmp EXIT INT TERM
   banner
   setup_report
 
