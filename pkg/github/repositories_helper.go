@@ -161,6 +161,53 @@ func filterPaths(entries []*github.TreeEntry, path string, maxResults int) []str
 	return matchedPaths
 }
 
+func deleteTreeEntriesForPath(entries []*github.TreeEntry, path string) ([]*github.TreeEntry, error) {
+	directoryOnly := strings.HasSuffix(path, "/")
+	targetPath := strings.TrimRight(path, "/")
+	if targetPath == "" {
+		return nil, fmt.Errorf("path %q does not exist in the repository", path)
+	}
+
+	directoryEntries := make([]*github.TreeEntry, 0)
+	directoryPrefix := targetPath + "/"
+	for _, entry := range entries {
+		entryPath := entry.GetPath()
+		if entryPath == "" {
+			continue
+		}
+
+		if !directoryOnly && entryPath == targetPath && entry.GetType() != "tree" {
+			return []*github.TreeEntry{newDeleteTreeEntry(entryPath, entry.GetMode(), entry.GetType())}, nil
+		}
+
+		if strings.HasPrefix(entryPath, directoryPrefix) && entry.GetType() != "tree" {
+			directoryEntries = append(directoryEntries, newDeleteTreeEntry(entryPath, entry.GetMode(), entry.GetType()))
+		}
+	}
+
+	if len(directoryEntries) > 0 {
+		return directoryEntries, nil
+	}
+
+	return nil, fmt.Errorf("path %q does not exist in the repository", path)
+}
+
+func newDeleteTreeEntry(path, mode, objectType string) *github.TreeEntry {
+	if mode == "" {
+		mode = "100644"
+	}
+	if objectType == "" {
+		objectType = "blob"
+	}
+
+	return &github.TreeEntry{
+		Path: github.Ptr(path),
+		Mode: github.Ptr(mode),
+		Type: github.Ptr(objectType),
+		SHA:  nil,
+	}
+}
+
 // looksLikeSHA returns true if the string appears to be a Git commit SHA.
 // A SHA is a 40-character hexadecimal string.
 func looksLikeSHA(s string) bool {

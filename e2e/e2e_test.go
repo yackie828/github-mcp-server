@@ -712,9 +712,24 @@ func TestDirectoryDeletion(t *testing.T) {
 	_, ok = resp.Content[0].(*mcp.TextContent)
 	require.True(t, ok, "expected content to be of type TextContent")
 
-	// Check the file exists
+	t.Logf("Creating second test file in %s/%s...", currentOwner, repoName)
+	resp, err = mcpClient.CallTool(ctx, &mcp.CallToolParams{
+		Name: "create_or_update_file",
+		Arguments: map[string]any{
+			"owner":   currentOwner,
+			"repo":    repoName,
+			"path":    "test-dir/nested/second-file.txt",
+			"content": fmt.Sprintf("Nested file for e2e test %s", t.Name()),
+			"message": "Add nested test file",
+			"branch":  "test-branch",
+		},
+	})
+	require.NoError(t, err, "expected to call 'create_or_update_file' tool successfully")
+	require.False(t, resp.IsError, fmt.Sprintf("expected result not to be an error: %+v", resp))
 
-	t.Logf("Getting file contents in %s/%s...", currentOwner, repoName)
+	// Check the files exist
+
+	t.Logf("Getting first file contents in %s/%s...", currentOwner, repoName)
 	resp, err = mcpClient.CallTool(ctx, &mcp.CallToolParams{
 		Name: "get_file_contents",
 		Arguments: map[string]any{
@@ -736,7 +751,26 @@ func TestDirectoryDeletion(t *testing.T) {
 
 	require.Equal(t, fmt.Sprintf("Created by e2e test %s", t.Name()), textResource.Text, "expected file content to match")
 
-	// Delete the directory containing the file
+	t.Logf("Getting nested file contents in %s/%s...", currentOwner, repoName)
+	resp, err = mcpClient.CallTool(ctx, &mcp.CallToolParams{
+		Name: "get_file_contents",
+		Arguments: map[string]any{
+			"owner": currentOwner,
+			"repo":  repoName,
+			"path":  "test-dir/nested/second-file.txt",
+			"ref":   "refs/heads/test-branch",
+		},
+	})
+	require.NoError(t, err, "expected to call 'get_file_contents' tool successfully")
+	require.False(t, resp.IsError, fmt.Sprintf("expected result not to be an error: %+v", resp))
+
+	embeddedResource, ok = resp.Content[1].(*mcp.EmbeddedResource)
+	require.True(t, ok, "expected content to be of type EmbeddedResource")
+	textResource = embeddedResource.Resource
+	require.NotNil(t, textResource, "expected embedded resource to have Resource")
+	require.Equal(t, fmt.Sprintf("Nested file for e2e test %s", t.Name()), textResource.Text, "expected nested file content to match")
+
+	// Delete the directory containing the files
 
 	t.Logf("Deleting directory in %s/%s...", currentOwner, repoName)
 	resp, err = mcpClient.CallTool(ctx, &mcp.CallToolParams{
@@ -744,7 +778,7 @@ func TestDirectoryDeletion(t *testing.T) {
 		Arguments: map[string]any{
 			"owner":   currentOwner,
 			"repo":    repoName,
-			"path":    "test-dir/test-file.txt",
+			"path":    "test-dir/",
 			"message": "Delete test directory",
 			"branch":  "test-branch",
 		},
@@ -785,12 +819,6 @@ func TestDirectoryDeletion(t *testing.T) {
 
 	// Find the deletion commit (list_commits returns in reverse chronological order,
 	// but timing can sometimes cause unexpected ordering)
-	// TODO: The delete_file tool only deletes individual files, not directories.
-	// This test creates a file in test-dir/ and deletes it, but doesn't actually
-	// test recursive directory deletion. We should either:
-	// 1. Rename TestDirectoryDeletion to TestFileDeletionInSubdirectory
-	// 2. Implement actual directory deletion in the MCP server (delete all files in dir)
-	// 3. Create multiple files and verify all are deleted
 	var deletionCommit *struct {
 		SHA    string `json:"sha"`
 		Commit struct {
@@ -834,9 +862,17 @@ func TestDirectoryDeletion(t *testing.T) {
 	}
 	err = json.Unmarshal([]byte(textContent.Text), &trimmedGetCommitText)
 	require.NoError(t, err, "expected to unmarshal text content successfully")
-	require.Len(t, trimmedGetCommitText.Files, 1, "expected to find one file change")
-	require.Equal(t, "test-dir/test-file.txt", trimmedGetCommitText.Files[0].Filename, "expected filename to match")
-	require.Equal(t, 1, trimmedGetCommitText.Files[0].Deletions, "expected one deletion")
+	require.Len(t, trimmedGetCommitText.Files, 2, "expected to find two file changes")
+	assert.ElementsMatch(t, []string{
+		"test-dir/test-file.txt",
+		"test-dir/nested/second-file.txt",
+	}, []string{
+		trimmedGetCommitText.Files[0].Filename,
+		trimmedGetCommitText.Files[1].Filename,
+	})
+	for _, file := range trimmedGetCommitText.Files {
+		require.Equal(t, 1, file.Deletions, "expected one deletion per file")
+	}
 }
 
 func TestRequestCopilotReview(t *testing.T) {

@@ -1119,7 +1119,7 @@ func DeleteFile(t translations.TranslationHelperFunc) inventory.ServerTool {
 		ToolsetMetadataRepos,
 		mcp.Tool{
 			Name:        "delete_file",
-			Description: t("TOOL_DELETE_FILE_DESCRIPTION", "Delete a file from a GitHub repository"),
+			Description: t("TOOL_DELETE_FILE_DESCRIPTION", "Delete a file or directory from a GitHub repository"),
 			Annotations: &mcp.ToolAnnotations{
 				Title:           t("TOOL_DELETE_FILE_USER_TITLE", "Delete file"),
 				ReadOnlyHint:    false,
@@ -1138,7 +1138,7 @@ func DeleteFile(t translations.TranslationHelperFunc) inventory.ServerTool {
 					},
 					"path": {
 						Type:        "string",
-						Description: "Path to the file to delete",
+						Description: "Path to the file or directory to delete",
 					},
 					"message": {
 						Type:        "string",
@@ -1206,14 +1206,27 @@ func DeleteFile(t translations.TranslationHelperFunc) inventory.ServerTool {
 				return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to get commit", resp, body), nil, nil
 			}
 
-			// Create a tree entry for the file deletion by setting SHA to nil
-			treeEntries := []*github.TreeEntry{
-				{
-					Path: github.Ptr(path),
-					Mode: github.Ptr("100644"), // Regular file mode
-					Type: github.Ptr("blob"),
-					SHA:  nil, // Setting SHA to nil deletes the file
-				},
+			tree, resp, err := client.Git.GetTree(ctx, owner, repo, *baseCommit.Tree.SHA, true)
+			if err != nil {
+				return ghErrors.NewGitHubAPIErrorResponse(ctx,
+					"failed to get repository tree",
+					resp,
+					err,
+				), nil, nil
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusOK {
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to read response body: %w", err)
+				}
+				return ghErrors.NewGitHubAPIStatusErrorResponse(ctx, "failed to get repository tree", resp, body), nil, nil
+			}
+
+			treeEntries, err := deleteTreeEntriesForPath(tree.Entries, path)
+			if err != nil {
+				return utils.NewToolResultError(err.Error()), nil, nil
 			}
 
 			// Create a new tree with the deletion

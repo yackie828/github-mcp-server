@@ -1273,7 +1273,7 @@ The following sets of tools are available:
   - `branch`: Branch to delete the file from (string, required)
   - `message`: Commit message (string, required)
   - `owner`: Repository owner (username or organization) (string, required)
-  - `path`: Path to the file to delete (string, required)
+  - `path`: Path to the file or directory to delete (string, required)
   - `repo`: Repository name (string, required)
 
 - **fork_repository** - Fork repository

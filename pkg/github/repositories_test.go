@@ -3140,6 +3140,7 @@ func Test_DeleteFile(t *testing.T) {
 	assert.Contains(t, schema.Properties, "path")
 	assert.Contains(t, schema.Properties, "message")
 	assert.Contains(t, schema.Properties, "branch")
+	assert.Equal(t, "Path to the file or directory to delete", schema.Properties["path"].Description)
 	// SHA is no longer required since we're using Git Data API
 	assert.ElementsMatch(t, schema.Required, []string{"owner", "repo", "path", "message", "branch"})
 
@@ -3155,6 +3156,42 @@ func Test_DeleteFile(t *testing.T) {
 		SHA: github.Ptr("abc123"),
 		Tree: &github.Tree{
 			SHA: github.Ptr("def456"),
+		},
+	}
+
+	mockGitTree := &github.Tree{
+		SHA: github.Ptr("def456"),
+		Entries: []*github.TreeEntry{
+			{
+				Path: github.Ptr("docs/example.md"),
+				Mode: github.Ptr("100644"),
+				Type: github.Ptr("blob"),
+				SHA:  github.Ptr("blobsha1"),
+			},
+			{
+				Path: github.Ptr("docs/examples"),
+				Mode: github.Ptr("040000"),
+				Type: github.Ptr("tree"),
+				SHA:  github.Ptr("treesha1"),
+			},
+			{
+				Path: github.Ptr("docs/examples/first.md"),
+				Mode: github.Ptr("100644"),
+				Type: github.Ptr("blob"),
+				SHA:  github.Ptr("blobsha2"),
+			},
+			{
+				Path: github.Ptr("docs/examples/nested/second.md"),
+				Mode: github.Ptr("100644"),
+				Type: github.Ptr("blob"),
+				SHA:  github.Ptr("blobsha3"),
+			},
+			{
+				Path: github.Ptr("docs/keep.md"),
+				Mode: github.Ptr("100644"),
+				Type: github.Ptr("blob"),
+				SHA:  github.Ptr("blobsha4"),
+			},
 		},
 	}
 
@@ -3188,6 +3225,11 @@ func Test_DeleteFile(t *testing.T) {
 				WithRequestMatch(
 					GetReposGitCommitsByOwnerByRepoByCommitSHA,
 					mockCommit,
+				),
+				// Get tree
+				WithRequestMatch(
+					GetReposGitTreesByOwnerByRepoByTree,
+					mockGitTree,
 				),
 				// Create tree
 				WithRequestMatchHandler(
@@ -3244,6 +3286,108 @@ func Test_DeleteFile(t *testing.T) {
 			expectedCommitSHA: "jkl012",
 		},
 		{
+			name: "successful directory deletion using Git Data API",
+			mockedClient: NewMockedHTTPClient(
+				WithRequestMatch(
+					GetReposGitRefByOwnerByRepoByRef,
+					mockRef,
+				),
+				WithRequestMatch(
+					GetReposGitCommitsByOwnerByRepoByCommitSHA,
+					mockCommit,
+				),
+				WithRequestMatch(
+					GetReposGitTreesByOwnerByRepoByTree,
+					mockGitTree,
+				),
+				WithRequestMatchHandler(
+					PostReposGitTreesByOwnerByRepo,
+					expectRequestBody(t, map[string]any{
+						"base_tree": "def456",
+						"tree": []any{
+							map[string]any{
+								"path": "docs/examples/first.md",
+								"mode": "100644",
+								"type": "blob",
+								"sha":  nil,
+							},
+							map[string]any{
+								"path": "docs/examples/nested/second.md",
+								"mode": "100644",
+								"type": "blob",
+								"sha":  nil,
+							},
+						},
+					}).andThen(
+						mockResponse(t, http.StatusCreated, mockTree),
+					),
+				),
+				WithRequestMatchHandler(
+					PostReposGitCommitsByOwnerByRepo,
+					expectRequestBody(t, map[string]any{
+						"message": "Delete example directory",
+						"tree":    "ghi789",
+						"parents": []any{"abc123"},
+					}).andThen(
+						mockResponse(t, http.StatusCreated, &github.Commit{
+							SHA:     github.Ptr("mno345"),
+							Message: github.Ptr("Delete example directory"),
+							HTMLURL: github.Ptr("https://github.com/owner/repo/commit/mno345"),
+						}),
+					),
+				),
+				WithRequestMatchHandler(
+					PatchReposGitRefsByOwnerByRepoByRef,
+					expectRequestBody(t, map[string]any{
+						"sha":   "mno345",
+						"force": false,
+					}).andThen(
+						mockResponse(t, http.StatusOK, &github.Reference{
+							Ref: github.Ptr("refs/heads/main"),
+							Object: &github.GitObject{
+								SHA: github.Ptr("mno345"),
+							},
+						}),
+					),
+				),
+			),
+			requestArgs: map[string]any{
+				"owner":   "owner",
+				"repo":    "repo",
+				"path":    "docs/examples/",
+				"message": "Delete example directory",
+				"branch":  "main",
+			},
+			expectError:       false,
+			expectedCommitSHA: "mno345",
+		},
+		{
+			name: "deletion fails when path does not exist",
+			mockedClient: NewMockedHTTPClient(
+				WithRequestMatch(
+					GetReposGitRefByOwnerByRepoByRef,
+					mockRef,
+				),
+				WithRequestMatch(
+					GetReposGitCommitsByOwnerByRepoByCommitSHA,
+					mockCommit,
+				),
+				WithRequestMatch(
+					GetReposGitTreesByOwnerByRepoByTree,
+					mockGitTree,
+				),
+			),
+			requestArgs: map[string]any{
+				"owner":   "owner",
+				"repo":    "repo",
+				"path":    "docs/missing.md",
+				"message": "Delete missing path",
+				"branch":  "main",
+			},
+			expectError:    false,
+			expectedErrMsg: `path "docs/missing.md" does not exist in the repository`,
+		},
+		{
 			name: "file deletion fails - branch not found",
 			mockedClient: NewMockedHTTPClient(
 				WithRequestMatchHandler(
@@ -3292,6 +3436,10 @@ func Test_DeleteFile(t *testing.T) {
 
 			// Parse the result and get the text content if no error
 			textContent := getTextResult(t, result)
+			if tc.expectedErrMsg != "" {
+				assert.Contains(t, textContent.Text, tc.expectedErrMsg)
+				return
+			}
 
 			// Unmarshal and verify the result
 			var response map[string]any
@@ -4262,6 +4410,74 @@ func Test_filterPaths(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			result := filterPaths(tc.tree, tc.path, tc.maxResults)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func Test_deleteTreeEntriesForPath(t *testing.T) {
+	tree := []*github.TreeEntry{
+		{Path: github.Ptr("docs/example.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob")},
+		{Path: github.Ptr("docs/examples"), Mode: github.Ptr("040000"), Type: github.Ptr("tree")},
+		{Path: github.Ptr("docs/examples/first.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob")},
+		{Path: github.Ptr("docs/examples/submodule"), Mode: github.Ptr("160000"), Type: github.Ptr("commit")},
+		{Path: github.Ptr("docs/examples/nested"), Mode: github.Ptr("040000"), Type: github.Ptr("tree")},
+		{Path: github.Ptr("docs/examples/nested/second.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob")},
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		expected    []*github.TreeEntry
+		expectedErr string
+	}{
+		{
+			name: "delete exact file",
+			path: "docs/example.md",
+			expected: []*github.TreeEntry{
+				{Path: github.Ptr("docs/example.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob"), SHA: nil},
+			},
+		},
+		{
+			name: "delete exact directory without trailing slash",
+			path: "docs/examples",
+			expected: []*github.TreeEntry{
+				{Path: github.Ptr("docs/examples/first.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob"), SHA: nil},
+				{Path: github.Ptr("docs/examples/submodule"), Mode: github.Ptr("160000"), Type: github.Ptr("commit"), SHA: nil},
+				{Path: github.Ptr("docs/examples/nested/second.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob"), SHA: nil},
+			},
+		},
+		{
+			name: "delete exact directory with trailing slash",
+			path: "docs/examples/",
+			expected: []*github.TreeEntry{
+				{Path: github.Ptr("docs/examples/first.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob"), SHA: nil},
+				{Path: github.Ptr("docs/examples/submodule"), Mode: github.Ptr("160000"), Type: github.Ptr("commit"), SHA: nil},
+				{Path: github.Ptr("docs/examples/nested/second.md"), Mode: github.Ptr("100644"), Type: github.Ptr("blob"), SHA: nil},
+			},
+		},
+		{
+			name:        "trailing slash does not match file",
+			path:        "docs/example.md/",
+			expectedErr: `path "docs/example.md/" does not exist in the repository`,
+		},
+		{
+			name:        "path not found",
+			path:        "docs/missing",
+			expectedErr: `path "docs/missing" does not exist in the repository`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := deleteTreeEntriesForPath(tree, tc.path)
+			if tc.expectedErr != "" {
+				require.Error(t, err)
+				assert.Equal(t, tc.expectedErr, err.Error())
+				return
+			}
+
+			require.NoError(t, err)
 			assert.Equal(t, tc.expected, result)
 		})
 	}

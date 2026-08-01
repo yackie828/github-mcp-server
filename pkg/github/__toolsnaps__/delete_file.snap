@@ -5,7 +5,7 @@
     "readOnlyHint": false,
     "title": "Delete file"
   },
-  "description": "Delete a file from a GitHub repository",
+  "description": "Delete a file or directory from a GitHub repository",
   "inputSchema": {
     "properties": {
       "branch": {
@@ -21,7 +21,7 @@
         "type": "string"
       },
       "path": {
-        "description": "Path to the file to delete",
+        "description": "Path to the file or directory to delete",
         "type": "string"
       },
       "repo": {
