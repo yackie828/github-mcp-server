@@ -435,7 +435,14 @@ rootkit_backdoor_detection() {
 
   if have_cmd rkhunter; then
     warn "Running rkhunter warning-only scan (can take time)"
-    rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null | tail -n 80 | while IFS= read -r line; do warn "$line"; done
+    local rkhunter_output=""
+    local rkhunter_status=0
+    rkhunter_output="$(run_with_timeout rkhunter --check --skip-keypress --report-warnings-only 2>/dev/null)" || rkhunter_status=$?
+    if [[ "$rkhunter_status" -eq 124 ]]; then
+      warn "rkhunter scan timed out after ${SCAN_TIMEOUT_SECONDS}s"
+    elif [[ -n "$rkhunter_output" ]]; then
+      while IFS= read -r line; do warn "$line"; done < <(printf '%s\n' "$rkhunter_output" | tail -n 80)
+    fi
   else
     warn "rkhunter not installed"
   fi
